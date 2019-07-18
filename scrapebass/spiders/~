@@ -1,0 +1,96 @@
+import scrapy
+from selenium import webdriver
+from selenium.webdriver.support.ui import WebDriverWait
+import re
+import json
+from selenium.common.exceptions import StaleElementReferenceException
+from bs4 import BeautifulSoup
+
+
+class AnglerSpider(scrapy.Spider):
+    name = 'anglers'
+
+    # All avaliable years 2011 - 2019
+    start_urls = [
+        'https://www.bassmaster.com/anglers-page?section=latest&page={}'.format(x)
+            for x in range(0, 1) #708
+        ]
+
+    def __init__(self):
+        self.driver = webdriver.Firefox()
+
+    def parse_selenium(self, response):
+        name = response.url.rsplit('/', 1)[1]
+        page = response.url
+        self.driver.get(page)
+
+        entries = WebDriverWait(self.driver, 20).until(lambda driver: driver.find_elements_by_css_selector("tr"))
+        links = self.driver.find_elements_by_xpath(
+	"/html/body/div[1]/div[3]/main/div/div/div/div[2]/div[1]/div/div/div/div/div/table/tbody/tr/td/span/a"
+	)
+
+        for row, link in zip(entries[1:], links):
+            try:
+                weight = row.find_element_by_css_selector('td.total_weight').text
+            except StaleElementReferenceException:
+                self.driver.implicitly_wait(20)
+                weight = row.find_element_by_css_selector('td.total_weight').text
+
+            # Handle getting skunked
+            if weight == '0':
+                weight = ['0lb', '0oz']
+            else:
+                weight = weight.split(" - ")
+
+            money = row.find_element_by_css_selector('td.total_money').text
+            cash = re.sub("[\$,]", "", money)
+            retval = {
+            "angler": name,
+            "tournament": row.find_element_by_css_selector('td.tournament').text,
+            "tournament_link": link.get_attribute('href'),
+            "place": row.find_element_by_css_selector('td.place').text,
+            "oz": (int(weight[0].strip("lb")) * 16) + int(weight[1].strip("oz")),
+            "winnings": float(cash),
+            }
+            yield retval
+
+    def parse_angler(self, response):
+        name = response.url.rsplit('/', 1)[1]
+        page = response.url
+        self.driver.get(page)
+        soup = BeautifulSoup(self.driver.page_source, 'lxml')
+
+        table = soup.find('tbody')
+
+        for row in table.find_all('tr'):
+            tourney = row.find('td', class_='tournament')
+            tournament_name = tourney.get_text()
+            tournament_link = tourney.find('a').get('href')
+            place = row.find('td', class_='place').get_text()
+            weight = row.find('td', class_='total_weight').get_text()
+            money = row.find('td', class_='total_money').get_text()
+
+            # Handle getting skunked
+            if weight == '0':
+                weight = ['0lb', '0oz']
+            else:
+                weight = weight.split(" - ")
+
+            cash = re.sub("[\$,]", "", money)
+
+            retval = {
+            "angler": name,
+            "tournament": tournament_name,
+            "tournament_link": tournament_link,
+            "place": place,
+            "oz": (int(weight[0].strip("lb")) * 16) + int(weight[1].strip("oz")),
+            "winnings": float(cash),
+            }
+            yield retval
+
+    def parse(self, response):
+        anglers = response.css('span.field-content a')
+        for angler in anglers:
+            name = angler.xpath('text()').get()
+            path = 'stats' + angler.xpath('@href').get()
+            yield response.follow(path, callback=self.parse_angler)
